@@ -584,11 +584,15 @@ class KIMODO_OT_UseInstalledKimodo(Operator):
 
 class KIMODO_OT_ResetVenv(Operator):
     bl_idname      = "kimodo.reset_venv"
-    bl_label       = "Reset Venv"
+    bl_label       = "Delete Virtual Environment"
     bl_description = (
         "Delete ~/.kimodo-venv and allow a fresh install. "
-        "Use this when a previous install failed or is stuck."
+        "Use this when a previous install failed, is stuck, or you need to "
+        "reinstall for a different GPU or Python version."
     )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
         if is_installing():

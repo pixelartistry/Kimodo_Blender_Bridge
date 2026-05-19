@@ -145,6 +145,13 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             box.label(text="Run first:  kimodo_textencoder --device cpu")
             box.label(text="This offloads the text encoder to CPU.")
 
+        # --- Delete venv (always shown when installed) ---
+        if so.is_installed() and not so.is_installing():
+            layout.separator(factor=0.5)
+            row = layout.row()
+            row.alignment = 'RIGHT'
+            row.operator("kimodo.reset_venv", text="Delete Venv", icon='TRASH', emboss=False)
+
 
 # ---------------------------------------------------------------------------
 # Panel 2: Motion Segments (timeline bars)
