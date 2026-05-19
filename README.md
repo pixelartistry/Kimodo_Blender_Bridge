@@ -2,7 +2,8 @@
 
 A Blender addon that generates AI-driven human motion via [NVIDIA Kimodo](https://github.com/nv-tlabs/kimodo) and imports it directly into your scene — no copy-pasting, no manual BVH wrangling.
 
-Tested on **Blender 5.1 / 4.4** · 
+Tested on 
+**Blender 5.1 / 4.4** ·
 **Arch Linux RTX 3090 Python 3.12
 Windows 11 RTX 1080 Python 3.12
 Windows 11 RTX 5070 Python 3.13**
