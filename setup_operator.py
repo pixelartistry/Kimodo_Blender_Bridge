@@ -39,6 +39,14 @@ _EXTRA_PYTHON_DIRS = [
     os.path.expanduser("~/.pyenv/shims"),
 ]
 
+# ---------------------------------------------------------------------------
+# HuggingFace download settings
+# ---------------------------------------------------------------------------
+
+_HF_TIMEOUT_SECS = 120   # per-request HTTP stall timeout (seconds)
+_HF_MAX_ATTEMPTS = 3     # total download attempts before giving up
+_HF_BACKOFF_BASE = 15    # seconds before first retry; doubles each time
+
 
 def _build_env(extra: "dict | None" = None) -> dict:
     """Return os.environ enriched with standard system paths and HOME.
@@ -79,7 +87,7 @@ _WRAPPER_PLACEHOLDER = "path_to_your_Llama_text-encoders"
 # ---------------------------------------------------------------------------
 
 _state: dict = {"running": False, "lines": [], "error": "", "done": False,
-                "needs_python": False}
+                "needs_python": False, "dl_progress": 0.0, "dl_label": ""}
 _lock = threading.Lock()
 
 
@@ -106,6 +114,33 @@ def install_status() -> str:
 def is_installing() -> bool:
     with _lock:
         return _state["running"]
+
+
+def download_progress() -> float:
+    """Return current HF download progress as 0.0–1.0 (0.0 when not downloading)."""
+    with _lock:
+        return _state["dl_progress"]
+
+
+def download_label() -> str:
+    """Return a short human-readable label for the active download step."""
+    with _lock:
+        return _state["dl_label"]
+
+
+def _set_dl_progress(frac: float, label: str = "") -> None:
+    with _lock:
+        _state["dl_progress"] = max(0.0, min(1.0, frac))
+        if label:
+            _state["dl_label"] = label
+
+
+def _parse_tqdm_pct(line: str) -> "float | None":
+    """Extract a 0.0–1.0 fraction from a tqdm progress line, or None."""
+    m = re.search(r"(\d+)%\|", line)
+    if m:
+        return int(m.group(1)) / 100.0
+    return None
 
 
 def install_failed() -> bool:
@@ -238,7 +273,8 @@ def _github_install_url(owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}/archive/HEAD.zip"
 
 
-def _run(cmd: list, step: str, env: "dict | None" = None) -> None:
+def _run(cmd: list, step: str, env: "dict | None" = None,
+         on_line: "callable | None" = None) -> None:
     """Run *cmd* as a subprocess, stream output to _log, raise on failure."""
     _log(f"▶ {step}")
     # Always build a complete environment so pip/venv work correctly when
@@ -257,9 +293,85 @@ def _run(cmd: list, step: str, env: "dict | None" = None) -> None:
         stripped = line.rstrip()
         if stripped:
             _log(stripped)
+            if on_line:
+                on_line(stripped)
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"{step} failed (exit {proc.returncode})")
+
+
+def _download_with_retry(
+    venv_py: str,
+    step: str,
+    repo_id: str,
+    local_dir: "str | None" = None,
+    hf_token: str = "",
+) -> None:
+    """Run snapshot_download in the venv with timeout, retry, and progress tracking.
+
+    All variable data (token, paths) is passed via env vars rather than
+    interpolated into the script string — this avoids quoting issues with
+    Windows paths and tokens containing special characters.
+    """
+    import time as _time
+
+    if local_dir:
+        dl_script = (
+            "import os; from huggingface_hub import snapshot_download; "
+            "tok = os.environ.get('_KBB_HF_TOKEN') or None; "
+            "snapshot_download(repo_id=os.environ['_KBB_REPO_ID'], "
+            "local_dir=os.environ['_KBB_LOCAL_DIR'], token=tok)"
+        )
+    else:
+        dl_script = (
+            "import os; from huggingface_hub import snapshot_download; "
+            "tok = os.environ.get('_KBB_HF_TOKEN') or None; "
+            "snapshot_download(repo_id=os.environ['_KBB_REPO_ID'], token=tok)"
+        )
+
+    extra_env = {
+        "_KBB_REPO_ID":           repo_id,
+        "_KBB_HF_TOKEN":          hf_token,
+        # Per-request HTTP stall timeout — prevents silent hangs on slow/rate-
+        # limited connections.  Individual requests that stall for longer than
+        # this value will be aborted and retried by huggingface_hub internally.
+        "HF_HUB_DOWNLOAD_TIMEOUT": str(_HF_TIMEOUT_SECS),
+        # Force unbuffered stdout so tqdm progress lines reach us in real time
+        # instead of sitting in the subprocess's output buffer.
+        "PYTHONUNBUFFERED":        "1",
+    }
+    if local_dir:
+        extra_env["_KBB_LOCAL_DIR"] = local_dir
+
+    def _on_line(line: str) -> None:
+        pct = _parse_tqdm_pct(line)
+        if pct is not None:
+            _set_dl_progress(pct, step)
+
+    last_exc: "Exception | None" = None
+    for attempt in range(1, _HF_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            wait = _HF_BACKOFF_BASE * (2 ** (attempt - 2))   # 15 s, 30 s
+            _log(f"  Retry {attempt}/{_HF_MAX_ATTEMPTS} in {wait}s…")
+            _time.sleep(wait)
+        _set_dl_progress(0.0, step)
+        try:
+            _run(
+                [venv_py, "-c", dl_script],
+                f"{step} (attempt {attempt}/{_HF_MAX_ATTEMPTS})",
+                env=extra_env,
+                on_line=_on_line,
+            )
+            _set_dl_progress(1.0, step)
+            return
+        except RuntimeError as exc:
+            last_exc = exc
+            _log(f"  Attempt {attempt} failed: {exc}")
+
+    raise RuntimeError(
+        f"{step} failed after {_HF_MAX_ATTEMPTS} attempts. "
+        f"Last error: {last_exc}"
+    )
 
 
 def _venv_pip() -> list:
@@ -318,7 +430,7 @@ def _patch_wrapper(wrapper_path: str, local_dir: str) -> None:
 # Background install thread
 # ---------------------------------------------------------------------------
 
-def _do_install() -> None:
+def _do_install(hf_token: str = "") -> None:
     global _state
     try:
         # 1 — Find a system Python ≥ 3.10
@@ -470,11 +582,13 @@ def _do_install() -> None:
         #     on HuggingFace.  We download it once and point the wrapper at it.
         _log(f"Downloading LLM2Vec model ({LLMVEC_MODEL_ID}) — this may take a while…")
         os.makedirs(LLMVEC_DIR, exist_ok=True)
-        dl_script = (
-            "from huggingface_hub import snapshot_download; "
-            f"snapshot_download(repo_id={LLMVEC_MODEL_ID!r}, local_dir={LLMVEC_DIR!r})"
+        _download_with_retry(
+            venv_py,
+            "Downloading LLM2Vec model",
+            repo_id=LLMVEC_MODEL_ID,
+            local_dir=LLMVEC_DIR,
+            hf_token=hf_token,
         )
-        _run([venv_py, "-c", dl_script], "Downloading LLM2Vec model")
 
         # 12 — Patch wrapper for fully offline operation
         _log("Patching llm2vec_wrapper.py for offline use…")
@@ -488,11 +602,12 @@ def _do_install() -> None:
         #      We only download the default SOMA model; the other two are
         #      unsupported in the addon UI and can be fetched later if needed.
         _log("Downloading Kimodo-SOMA-RP-v1 model weights — this may take a while…")
-        dl_weights = (
-            "from huggingface_hub import snapshot_download; "
-            "snapshot_download(repo_id='nvidia/Kimodo-SOMA-RP-v1')"
+        _download_with_retry(
+            venv_py,
+            "Downloading Kimodo-SOMA-RP-v1 weights",
+            repo_id="nvidia/Kimodo-SOMA-RP-v1",
+            hf_token=hf_token,
         )
-        _run([venv_py, "-c", dl_weights], "Downloading Kimodo-SOMA-RP-v1 weights")
 
         # 14 — Update the addon's Python path on the main thread
         def _set_path():
@@ -556,9 +671,19 @@ class KIMODO_OT_InstallKimodo(Operator):
             return {"CANCELLED"}
 
         with _lock:
-            _state.update(running=True, lines=[], error="", done=False, needs_python=False)
+            _state.update(running=True, lines=[], error="", done=False,
+                          needs_python=False, dl_progress=0.0, dl_label="")
 
-        threading.Thread(target=_do_install, daemon=True).start()
+        # Read the HF token on the main thread — preferences are not safe to
+        # access from background threads.
+        hf_token = ""
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            hf_token = (prefs.hf_token or "").strip()
+        except Exception:
+            pass
+
+        threading.Thread(target=_do_install, args=(hf_token,), daemon=True).start()
 
         # Keep the N-panel refreshing while the install runs
         def _redraw():

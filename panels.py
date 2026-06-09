@@ -42,6 +42,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             box = layout.box()
             box.label(text="Installing Kimodo…", icon='TIME')
             box.label(text=so.install_status())
+            dl_pct = so.download_progress()
+            if dl_pct > 0.0:
+                label = so.download_label()
+                short = label.replace("Downloading ", "").replace(" (attempt 1/3)", "")
+                box.progress(factor=dl_pct, text=f"{short}  {int(dl_pct * 100)}%")
             layout.separator(factor=0.5)
 
         elif so.install_failed() or (so.venv_exists() and not so.is_installed()):
@@ -85,6 +90,13 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Kimodo not installed", icon='INFO')
             box.label(text="Installs to:  ~/.kimodo-venv/")
             box.label(text="Requires:  Python 3.10+, ~8 GB disk, internet")
+            try:
+                prefs = context.preferences.addons[__package__].preferences
+                token_row = box.row(align=True)
+                token_row.label(text="HF Token (optional):", icon='LOCKED')
+                token_row.prop(prefs, "hf_token", text="")
+            except Exception:
+                pass
             row = box.row()
             row.enabled = has_gpu
             row.operator("kimodo.install_kimodo", icon='IMPORT')

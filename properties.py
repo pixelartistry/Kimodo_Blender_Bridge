@@ -429,6 +429,17 @@ class KIMODO_AddonPreferences(AddonPreferences):
         default="{}",
     )
 
+    hf_token: StringProperty(
+        name="HuggingFace Token",
+        description=(
+            "Optional HuggingFace access token (hf_...). Prevents rate-limiting "
+            "during model downloads. Get a free read token at "
+            "huggingface.co/settings/tokens"
+        ),
+        default="",
+        subtype='PASSWORD',
+    )
+
 
 # ---------------------------------------------------------------------------
 # Registration
