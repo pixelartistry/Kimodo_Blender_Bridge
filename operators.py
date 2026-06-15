@@ -4,6 +4,7 @@ All bpy.ops.kimodo.* operators.
 """
 
 import bpy
+import addon_utils
 import os
 import json
 import threading
@@ -15,6 +16,43 @@ from bpy.props import StringProperty, BoolProperty, IntProperty
 from . import subprocess_client as sc
 from . import retarget as rt
 from . import constraints as cmod
+
+
+# ---------------------------------------------------------------------------
+# BVH importer compatibility (Blender 5.0+)
+# ---------------------------------------------------------------------------
+
+def _ensure_bvh_importer() -> bool:
+    """Make sure bpy.ops.import_anim.bvh is registered.
+
+    Blender 5.0+ ships the legacy BVH importer (io_anim_bvh) disabled by
+    default, so the operator is missing on a fresh install and calling it
+    raises "could not be found". Enable it on demand. Returns True if the
+    operator is available afterwards.
+    """
+    if hasattr(bpy.ops.import_anim, "bvh"):
+        return True
+    try:
+        addon_utils.enable("io_anim_bvh", default_set=True, persistent=True)
+    except Exception:
+        pass
+    return hasattr(bpy.ops.import_anim, "bvh")
+
+
+def _import_bvh(**kwargs):
+    """Import a BVH file, self-healing a missing/disabled importer add-on.
+
+    Raises RuntimeError with an actionable message if the importer cannot be
+    made available, so callers can report it cleanly instead of leaking a
+    cryptic operator traceback.
+    """
+    if not _ensure_bvh_importer():
+        raise RuntimeError(
+            "Blender's BVH importer is not available. In Blender 5.0+ enable "
+            "'Import-Export: BioVision Motion Capture (BVH)' under "
+            "Edit > Preferences > Add-ons (search 'BVH'), then try again."
+        )
+    return bpy.ops.import_anim.bvh(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -367,19 +405,23 @@ class KIMODO_OT_ImportBVH(Operator):
         # Remember which objects exist before import
         before = set(bpy.context.scene.objects)
 
-        bpy.ops.import_anim.bvh(
-            filepath=path,
-            axis_forward='-Z',
-            axis_up='Y',
-            target='ARMATURE',
-            global_scale=0.01,   # BVH is usually in cm; Blender expects meters
-            frame_start=1,
-            use_fps_scale=False,
-            update_scene_fps=False,
-            update_scene_duration=True,
-            use_cyclic=False,
-            rotate_mode='NATIVE',
-        )
+        try:
+            _import_bvh(
+                filepath=path,
+                axis_forward='-Z',
+                axis_up='Y',
+                target='ARMATURE',
+                global_scale=0.01,   # BVH is usually in cm; Blender expects meters
+                frame_start=1,
+                use_fps_scale=False,
+                update_scene_fps=False,
+                update_scene_duration=True,
+                use_cyclic=False,
+                rotate_mode='NATIVE',
+            )
+        except RuntimeError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
 
         # Find newly added armature
         after = set(bpy.context.scene.objects)
@@ -1186,18 +1228,22 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
 
         before = set(bpy.data.objects)
 
-        bpy.ops.import_anim.bvh(
-            filepath=self.filepath,
-            axis_forward='-Z', axis_up='Y',
-            target='ARMATURE',
-            global_scale=0.01,
-            frame_start=self.start_frame,
-            use_fps_scale=False,
-            update_scene_fps=False,
-            update_scene_duration=False,
-            use_cyclic=False,
-            rotate_mode='NATIVE',
-        )
+        try:
+            _import_bvh(
+                filepath=self.filepath,
+                axis_forward='-Z', axis_up='Y',
+                target='ARMATURE',
+                global_scale=0.01,
+                frame_start=self.start_frame,
+                use_fps_scale=False,
+                update_scene_fps=False,
+                update_scene_duration=False,
+                use_cyclic=False,
+                rotate_mode='NATIVE',
+            )
+        except RuntimeError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
 
         after   = set(bpy.data.objects)
         new_arm = next((o for o in after - before if o.type == 'ARMATURE'), None)
@@ -1878,18 +1924,25 @@ class KIMODO_OT_GenerateVariations(Operator):
 
         if ext == ".bvh":
             before = set(bpy.data.objects)
-            bpy.ops.import_anim.bvh(
-                filepath=file_path,
-                axis_forward='-Z', axis_up='Y',
-                target='ARMATURE',
-                global_scale=0.01,
-                frame_start=1,
-                use_fps_scale=False,
-                update_scene_fps=False,
-                update_scene_duration=True,
-                use_cyclic=False,
-                rotate_mode='NATIVE',
-            )
+            try:
+                _import_bvh(
+                    filepath=file_path,
+                    axis_forward='-Z', axis_up='Y',
+                    target='ARMATURE',
+                    global_scale=0.01,
+                    frame_start=1,
+                    use_fps_scale=False,
+                    update_scene_fps=False,
+                    update_scene_duration=True,
+                    use_cyclic=False,
+                    rotate_mode='NATIVE',
+                )
+            except RuntimeError as e:
+                context.window_manager.event_timer_remove(self._timer)
+                s.is_generating = False
+                s.generation_progress = f"Variation {var_num} failed ✗"
+                self.report({'ERROR'}, str(e))
+                return {'FINISHED'}
             after   = set(bpy.data.objects)
             new_arm = next((o for o in after - before if o.type == 'ARMATURE'), None)
             if new_arm:

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **BVH import failed on a fresh Blender 5.0+ install** (#25): Blender 5.0 ships the legacy BVH importer (`io_anim_bvh`) disabled by default, so `bpy.ops.import_anim.bvh` was "could not be found" and *Generate Motion* crashed with a traceback (originally reported on an RTX 3080ti, but the GPU was unrelated). BVH import now goes through a single helper that enables the importer add-on on demand, and falls back to a clear, actionable error message (reported in the UI) if it cannot be enabled.
+
 ## [1.5.2] — 2026-06-09
 
 ### Fixed
