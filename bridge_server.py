@@ -11,6 +11,7 @@ stdout → one JSON line per message:   {"status": "loading"|"ready"|"progress"|
 stderr is left alone (Kimodo/PyTorch logging goes there).
 """
 
+import inspect
 import json
 import os
 import sys
@@ -56,10 +57,11 @@ def _save_output(output, output_format, model, device, standard_tpose, prefix="k
         joints_rot = torch.from_numpy(output["global_rot_mats"][0]).to(device)
         local_rots = global_rots_to_local_rots(joints_rot, skeleton)
         root_pos   = joints_pos[:, skeleton.root_idx, :]
-        save_motion_bvh(
-            out_path, local_rots, root_pos,
-            skeleton=skeleton, fps=fps, standard_tpose=standard_tpose,
-        )
+        
+        bvh_kwargs = {"skeleton": skeleton, "fps": fps}
+        if "standard_tpose" in inspect.signature(save_motion_bvh).parameters:
+            bvh_kwargs["standard_tpose"] = standard_tpose
+        save_motion_bvh(out_path, local_rots, root_pos, **bvh_kwargs)
     else:
         single = {
             k: (v[0] if hasattr(v, "shape") and v.ndim > 0 and v.shape[0] == 1 else v)
